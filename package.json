@@ -1,0 +1,26 @@
+{
+  "name": "phlow",
+  "version": "1.0.0",
+  "description": "",
+  "main": "app.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@orbiter-finance/bridge-sdk": "^0.1.12",
+    "africastalking": "^0.7.3",
+    "axios": "^1.8.3",
+    "crypto-js": "^4.2.0",
+    "dotenv": "^16.4.7",
+    "ethers": "^6.13.5",
+    "express": "^4.21.2",
+    "express-rate-limit": "^7.5.0",
+    "helmet": "^8.0.0",
+    "mongodb": "6.14",
+    "mongoose": "^8.12.1",
+    "starknet": "^6.23.1"
+  }
+}
