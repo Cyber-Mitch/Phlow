@@ -1,8 +1,8 @@
+// routes/ussd.js
 const express = require('express');
 const router = express.Router();
-const { ussdLimiter } = require('../middleware/rateLimiter');
 const { processUSSD } = require('../controllers/ussdController');
 
-router.post('/', ussdLimiter, processUSSD);
+router.post('/', processUSSD);
 
 module.exports = router;

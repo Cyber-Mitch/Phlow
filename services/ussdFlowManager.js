@@ -1,136 +1,156 @@
-const User = require('../models/User');
-const Transaction = require('../models/Transaction');
-const { getBalance, transferTokens } = require('./blockchain/starknet');
-const { bridgeToEthereum } = require('./blockchain/orbiter');
-const { convertToFiat } = require('./offramp/wyre');
+// ussdFlowManager.js
+const { ec, Account, RpcProvider, computeAddress, constants } = require('starknet');
+const { encrypt } = require('../middleware/security');
+
+
+
+// Initialize StarkNet provider
+const provider = new RpcProvider({ nodeUrl: 'https://starknet-testnet.infura.io/v3/YOUR_INFURA_KEY' });
+
+console.log('RELAYER_ADDRESS:', process.env.RELAYER_ADDRESS);
+console.log('RELAYER_PRIVATE_KEY:', process.env.RELAYER_PRIVATE_KEY);
+
+// Assume a relayer account is set up with funds to deploy user accounts
+const relayer = new Account(provider, process.env.RELAYER_ADDRESS, process.env.RELAYER_PRIVATE_KEY);
+
+// Placeholder SMS function (implement with your SMS provider)
+const sendSMS = async (phoneNumber, message) => {
+  console.log(`SMS to ${phoneNumber}: ${message}`);
+  // Integrate with Twilio, Nexmo, etc.
+};
+
+// Validate Ethereum address (simple check)
+const isValidEthereumAddress = (address) => /^0x[a-fA-F0-9]{40}$/.test(address);
 
 exports.handleMenuNavigation = async ({ sessionId, phoneNumber, text }) => {
-  try {
-    const user = await User.findOne({ phoneNumber });
-    const input = text ? text.split('*') : []; // Split USSD input by '*'
+  const user = await User.findOne({ phoneNumber });
+  const input = text ? text.split('*') : [];
 
-    if (input.length === 0) {
-      // Initial menu
-      return `CON Welcome to Plow!
-      1. Connect Wallet
-      2. Check Balance
-      3. Convert Crypto to Cash
-      4. Transaction History
-      5. Change Bank Account`;
-    }
+  if (input.length === 0) {
+    return `CON Welcome to Phlow!
+    1. Connect Wallet
+    2. Create New Wallet
+    3. Check Balance
+    4. Convert Crypto to Cash
+    5. Buy Crypto with Fiat
+    6. Transaction History
+    7. Change Bank Account`;
+  }
 
-    const [step, ...values] = input;
+  const [step, ...values] = input;
 
-    switch (step) {
-      case '1': // Connect Wallet
-        if (values.length === 0) {
-          return `CON Enter your wallet details in this format:
-          StarkNet Private Key,StarkNet Address,Ethereum Private Key,Ethereum Address
-          Example: 0x123...,0x456...,0x789...,0xabc...`;
-        }
+  switch (step) {
+    case '2': // Create New Wallet
+      if (values.length === 0) {
+        // Generate new key pair
+        const keyPair = ec.genKeyPair();
+        const privateKey = keyPair.getPrivate().toString(16);
+        const publicKey = ec.getStarkKey(keyPair);
 
-        // Split the input into individual values
-        const [starknetPrivateKey, starknetAddress, ethereumPrivateKey, ethereumAddress] = values[0].split(',');
+        // Standard StarkNet account class hash (update with Argent's if needed)
+        const classHash = '0x...'; // Replace with actual Argent or standard class hash
+        const salt = publicKey;
+        const constructorCalldata = [publicKey];
 
-        // Validate the input
-        if (!starknetPrivateKey || !starknetAddress || !ethereumPrivateKey || !ethereumAddress) {
-          return 'END Invalid format. Please try again.';
-        }
+        // Compute account address
+        const accountAddress = computeAddress(classHash, constructorCalldata, salt);
 
-        // Save the wallet details
+        // Deploy account using relayer
+        const deployTx = await relayer.deployAccount({
+          classHash,
+          constructorCalldata,
+          addressSalt: salt
+        });
+        await provider.waitForTransaction(deployTx.transaction_hash);
+
+        // Store user data
         await User.findOneAndUpdate(
           { phoneNumber },
-          { 
-            starknetPrivateKey, 
-            starknetAddress, 
-            ethereumPrivateKey, 
-            ethereumAddress 
+          {
+            encryptedKey: encrypt(privateKey),
+            starknetAddress: accountAddress,
+            isNewWallet: true
           },
           { upsert: true }
         );
-        return 'END Wallet connected successfully!';
 
-      case '2': // Check Balance
-        if (!user) return 'END Wallet not connected. Use option 1 to connect.';
-        const starknetBalance = await getBalance(user.starknetAddress, 'ETH');
-        return `END Your StarkNet balance: ${starknetBalance} ETH`;
+        // Send private key via SMS
+        await sendSMS(phoneNumber, `Your new StarkNet private key: ${privateKey}`);
 
-      case '3': // Convert Crypto to Cash
-        if (!user) return 'END Wallet not connected. Use option 1 to connect.';
-        if (values.length === 0) return `CON Select token:
-        1. STRK (StarkNet)
-        2. ETH (StarkNet)
-        3. USDT (StarkNet)`;
+        return `CON New StarkNet wallet created. Private key sent via SMS.
+        Please enter your Ethereum address for bridging:`;
+      }
 
-        const tokenOption = values[0];
-        let token;
-        switch (tokenOption) {
-          case '1':
-            token = 'STRK';
-            break;
-          case '2':
-            token = 'ETH';
-            break;
-          case '3':
-            token = 'USDT';
-            break;
-          default:
-            return 'END Invalid token selected.';
+      if (values.length === 1) {
+        const ethereumAddress = values[0];
+        if (!isValidEthereumAddress(ethereumAddress)) {
+          return 'END Invalid Ethereum address. Please try again.';
         }
-
-        if (values.length === 1) return `CON Enter amount to convert (in ${token}):`;
-        if (values.length === 2) return 'CON Enter your bank account number:';
-
-        const amount = parseFloat(values[1]);
-        const accountNumber = values[2];
-
-        // Step 1: Transfer tokens to Orbiter's StarkNet address
-        const orbiterStarknetAddress = '0xOrbiterStarknetAddress'; // Replace with Orbiter's StarkNet address
-        const txHash = await transferTokens(user.starknetPrivateKey, user.starknetAddress, orbiterStarknetAddress, token, amount);
-
-        // Step 2: Initiate bridge to Ethereum using Orbiter
-        const bridgeResult = await bridgeToEthereum(txHash, user.ethereumAddress, token, amount);
-
-        // Step 3: Convert bridged tokens to fiat using Wyre
-        const fiatTx = await convertToFiat(bridgeResult.recipient, amount, accountNumber);
-
-        // Save transaction to database
-        await Transaction.create({
-          user: user._id,
-          type: 'conversion',
-          token,
-          amount,
-          status: 'completed',
-          txHash: fiatTx.id
-        });
-
-        return `END Conversion successful! Fiat TX ID: ${fiatTx.id}`;
-
-      case '4': // Transaction History
-        if (!user) return 'END Wallet not connected. Use option 1 to connect.';
-        const transactions = await Transaction.find({ user: user._id }).sort({ createdAt: -1 }).limit(5);
-        if (transactions.length === 0) return 'END No transactions found.';
-
-        let history = 'END Recent Transactions:\n';
-        transactions.forEach((tx, index) => {
-          history += `${index + 1}. ${tx.type} - ${tx.amount} ${tx.token} - ${tx.status}\n`;
-        });
-        return history;
-
-      case '5': // Change Bank Account
-        if (!user) return 'END Wallet not connected. Use option 1 to connect.';
-        if (values.length === 0) return 'CON Enter new bank account number:';
-        if (values.length === 1) return 'CON Enter bank code:';
 
         await User.findOneAndUpdate(
           { phoneNumber },
-          { bankAccount: { number: values[0], code: values[1] } }
+          { ethereumAddress, isNewWallet: false }
         );
-        return 'END Bank account updated successfully!';
+        return 'END Wallet setup completed.';
+      }
+      break;
 
-      default:
-        return 'END Invalid option. Please try again.';
+    // Other cases remain below...
+  }
+};// ussdFlowManager.js
+const User = require('../models/User');
+const Transaction = require('../models/Transaction');
+
+exports.handleMenuNavigation = async ({ sessionId, phoneNumber, serviceCode, text }) => {
+  try {
+    const user = await User.findOne({ phoneNumber });
+    let response = '';
+
+    // Initial request (empty text)
+    if (text === '') {
+      response = `CON Welcome to Plow!
+      1. Connect Wallet
+      2. Check Phone Number
+      3. Check Balance`;
     }
+    // Level 1: Connect Wallet
+    else if (text === '1') {
+      response = `CON Enter your wallet address:`;
+    }
+    // Level 2: Handle wallet address input
+    else if (text.startsWith('1*')) {
+      const walletAddress = text.split('*')[1];
+      if (!walletAddress) {
+        response = 'END Please provide a valid wallet address.';
+      } else {
+        await User.findOneAndUpdate(
+          { phoneNumber },
+          { starknetAddress: walletAddress },
+          { upsert: true }
+        );
+        response = `END Wallet ${walletAddress} connected successfully!`;
+      }
+    }
+    // Level 1: Check Phone Number (example from Africa's Talking)
+    else if (text === '2') {
+      response = `END Your phone number is ${phoneNumber}`;
+    }
+    // Level 1: Check Balance
+    else if (text === '3') {
+      if (!user || !user.starknetAddress) {
+        response = 'END Wallet not connected. Use option 1 to connect.';
+      } else {
+        // Placeholder for balance check logic
+        const balance = '1.5'; // Replace with actual getBalance call
+        response = `END Your balance is ${balance} ETH`;
+      }
+    }
+    // Invalid input
+    else {
+      response = 'END Invalid option. Please try again.';
+    }
+
+    return response;
   } catch (error) {
     console.error(`Error in session ${sessionId}:`, error);
     return 'END An error occurred. Please try again later.';

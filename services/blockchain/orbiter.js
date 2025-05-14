@@ -1,57 +1,53 @@
-const axios = require('axios');
+// blockchain/orbiter.js
+const { OrbiterClient, ENDPOINT } = require('@orbiter-finance/bridge-sdk');
+const { Account, RpcProvider, constants } = require('starknet');
+const { decrypt } = require('../middleware/security');
 
-// Orbiter Finance API configuration
-const ORBITER_API_URL = 'https://testnet-api.orbiter.finance/sdk'; // Testnet URL
-const ORBITER_API_KEY = 'YOUR_ORBITER_API_KEY'; // Replace with your Orbiter API key
+const provider = new RpcProvider({ nodeUrl: 'https://starknet-testnet.infura.io/v3/YOUR_INFURA_KEY' });
 
-/**
- * Bridge tokens from StarkNet to Ethereum using Orbiter Finance.
- * @param {string} txHash - The StarkNet transaction hash of the token transfer.
- * @param {string} recipient - The Ethereum address to receive the tokens.
- * @param {string} token - The token symbol (e.g., 'ETH', 'USDT', 'STRK').
- * @param {number} amount - The amount of tokens to bridge.
- * @returns {object} - The bridge transaction details.
- */
-exports.bridgeToEthereum = async (txHash, recipient, token, amount) => {
-  try {
-    // Call Orbiter API to initiate the bridge
-    const response = await axios.post(`${ORBITER_API_URL}/bridge`, {
-      sourceChain: 'starknet',
-      targetChain: 'ethereum',
-      txHash,
-      recipient,
-      token,
-      amount: amount.toString(),
-    }, {
-      headers: {
-        'Authorization': `Bearer ${ORBITER_API_KEY}`,
-        'Content-Type': 'application/json',
-      },
-    });
+// Initialize Orbiter client
+const orbiter = await OrbiterClient.create({
+  apiEndpoint: ENDPOINT.TESTNET,
+  apiKey: process.env.ORBITER_API_KEY,
+  channelId: process.env.ORBITER_CHANNEL_ID
+});
 
-    return response.data;
-  } catch (error) {
-    console.error('Orbiter Bridge Error:', error.response ? error.response.data : error.message);
-    throw new Error('Failed to initiate bridge transaction.');
-  }
+exports.bridgeToEthereum = async (privateKey, starknetAddress, recipient, token, amount) => {
+  const tradePair = {
+    srcChainId: 'SN_SEPOLIA',
+    dstChainId: '11155111', // Sepolia Ethereum testnet
+    srcTokenSymbol: token,
+    dstTokenSymbol: token,
+    routerType: 'CONTRACT'
+  };
+
+  const router = orbiter.createRouter(tradePair);
+  const sendValue = amount.toString(); // Ensure amount is in correct format
+
+  const account = new Account(provider, starknetAddress, privateKey);
+  const approve = await router.createApprove(starknetAddress, sendValue);
+  const transaction = router.createTransaction(starknetAddress, recipient, sendValue);
+
+  const txResponse = await account.execute([approve, transaction]);
+  await provider.waitForTransaction(txResponse.transaction_hash);
+
+  return { transactionHash: txResponse.transaction_hash, recipient };
 };
 
-/**
- * Check the status of a bridge transaction.
- * @param {string} txHash - The transaction hash of the bridge transaction.
- * @returns {object} - The status of the bridge transaction.
- */
-exports.checkBridgeStatus = async (txHash) => {
-  try {
-    const response = await axios.get(`${ORBITER_API_URL}/transaction/status/${txHash}`, {
-      headers: {
-        'Authorization': `Bearer ${ORBITER_API_KEY}`,
-      },
-    });
+exports.bridgeToStarkNet = async (ethereumAddress, recipient, token, amount) => {
+  const tradePair = {
+    srcChainId: '11155111',
+    dstChainId: 'SN_SEPOLIA',
+    srcTokenSymbol: token,
+    dstTokenSymbol: token,
+    routerType: 'EOA'
+  };
 
-    return response.data;
-  } catch (error) {
-    console.error('Orbiter Status Check Error:', error.response ? error.response.data : error.message);
-    throw new Error('Failed to check bridge transaction status.');
-  }
-}
+  const router = orbiter.createRouter(tradePair);
+  const sendValue = amount.toString();
+
+  // Note: Requires Ethereum wallet integration for signing, omitted here for simplicity
+  // Assume Yellow Card handles sending to Ethereum, and we bridge from there
+  const transaction = router.createTransaction(ethereumAddress, recipient, sendValue);
+  // Execute via Ethereum provider (e.g., ethers.js) - to be implemented if needed
+};
